@@ -1,5 +1,6 @@
 import type { ChildProcess, ExecFileException } from 'child_process'
 import { execFile, spawn } from 'child_process'
+import { existsSync } from 'fs'
 import memoize from 'lodash-es/memoize.js'
 import { homedir } from 'os'
 import * as path from 'path'
@@ -55,13 +56,51 @@ const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
-  const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
-  const command =
+  const platformDir =
     process.platform === 'win32'
-      ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
-      : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
+      ? `${process.arch}-win32`
+      : `${process.arch}-${process.platform}`
+  const rgBinary = process.platform === 'win32' ? 'rg.exe' : 'rg'
 
-  return { mode: 'builtin', command, args: [] }
+  // Primary: vendor directory adjacent to this file (works in built npm packages)
+  const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
+  const builtinCommand = path.resolve(rgRoot, platformDir, rgBinary)
+  if (existsSync(builtinCommand)) {
+    return { mode: 'builtin', command: builtinCommand, args: [] }
+  }
+
+  // Fallback: node_modules vendor (source checkout running via `bun run dev`)
+  // __dirname is src/utils/ in normal mode, project root in test mode
+  const projectRoot =
+    process.env.NODE_ENV === 'test'
+      ? __dirname
+      : path.resolve(__dirname, '..', '..')
+  const nodeModulesRgRoot = path.resolve(
+    projectRoot,
+    'node_modules',
+    '@anthropic-ai',
+    'claude-agent-sdk',
+    'vendor',
+    'ripgrep',
+  )
+  const nodeModulesCommand = path.resolve(
+    nodeModulesRgRoot,
+    platformDir,
+    rgBinary,
+  )
+  if (existsSync(nodeModulesCommand)) {
+    return { mode: 'builtin', command: nodeModulesCommand, args: [] }
+  }
+
+  // Last resort: try system ripgrep even if user didn't set USE_BUILTIN_RIPGREP=false
+  const { cmd: systemFallback } = findExecutable('rg', [])
+  if (systemFallback !== 'rg') {
+    return { mode: 'system', command: 'rg', args: [] }
+  }
+
+  // Nothing found — return the original builtin path so the downstream
+  // ENOENT error message points at the expected location for debugging.
+  return { mode: 'builtin', command: builtinCommand, args: [] }
 })
 
 export function ripgrepCommand(): {
