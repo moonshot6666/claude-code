@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a **reverse-engineered / decompiled** version of Anthropic's official Claude Code CLI tool. The goal is to restore core functionality while trimming secondary capabilities. Many modules are stubbed or feature-flagged off. The codebase has ~1341 tsc errors from decompilation (mostly `unknown`/`never`/`{}` types) — these do **not** block Bun runtime execution.
+This is a **reverse-engineered / decompiled** version of Anthropic's official Claude Code CLI tool (`claude-js`). The goal is to restore core functionality while trimming secondary capabilities. Many modules are stubbed or feature-flagged off. The codebase has tsc errors from decompilation (mostly `unknown`/`never`/`{}` types) — these do **not** block Bun runtime execution.
 
 ## Commands
 
@@ -19,20 +19,37 @@ bun run dev
 # Pipe mode
 echo "say hello" | bun run src/entrypoints/cli.tsx -p
 
-# Build (outputs dist/cli.js, ~25MB)
+# Build (code-split output to dist/ — cli.js + ~450 chunks)
 bun run build
-```
 
-No test runner is configured. No linter is configured.
+# Lint (Biome)
+bun run lint
+bun run lint:fix
+
+# Format
+bun run format
+
+# Tests (Bun test runner)
+bun test
+
+# Unused code detection (Knip)
+bun run check:unused
+
+# Health check (code size, lint, tests, build in one report)
+bun run health
+
+# Documentation site (Mintlify)
+bun run docs:dev
+```
 
 ## Architecture
 
 ### Runtime & Build
 
 - **Runtime**: Bun (not Node.js). All imports, builds, and execution use Bun APIs.
-- **Build**: `bun build src/entrypoints/cli.tsx --outdir dist --target bun` — single-file bundle.
+- **Build**: `build.ts` — uses `Bun.build()` with code splitting (`splitting: true`), then post-processes output for Node.js compatibility via `createRequire` patching. Output: `dist/cli.js` entry + ~450 chunk files. Works under both Bun and Node.js.
 - **Module system**: ESM (`"type": "module"`), TSX with `react-jsx` transform.
-- **Monorepo**: Bun workspaces — internal packages live in `packages/` resolved via `workspace:*`.
+- **Monorepo**: Bun workspaces — internal packages live in `packages/` and `packages/@ant/`, resolved via `workspace:*`.
 
 ### Entry & Bootstrap
 
@@ -88,16 +105,19 @@ No test runner is configured. No linter is configured.
 
 All `feature('FLAG_NAME')` calls come from `bun:bundle` (a build-time API). In this decompiled version, `feature()` is polyfilled to always return `false` in `cli.tsx`. This means all Anthropic-internal features (COORDINATOR_MODE, KAIROS, PROACTIVE, etc.) are disabled.
 
-### Stubbed/Deleted Modules
+### Internal Packages (`packages/`)
 
-| Module | Status |
-|--------|--------|
-| Computer Use (`@ant/*`) | Stub packages in `packages/@ant/` |
-| `*-napi` packages (audio, image, url, modifiers) | Stubs in `packages/` (except `color-diff-napi` which is fully implemented) |
-| Analytics / GrowthBook / Sentry | Empty implementations |
-| Magic Docs / Voice Mode / LSP Server | Removed |
-| Plugins / Marketplace | Removed |
-| MCP OAuth | Simplified |
+| Package | Status | Description |
+|---------|--------|-------------|
+| `color-diff-napi` | Implemented | Pure TS port (~1000 lines) — syntax highlighting, word-diff, truecolor/256-color themes. Has tests. |
+| `modifiers-napi` | Implemented | macOS Carbon FFI via `bun:ffi` — `isModifierPressed()`. Returns `false` on non-Darwin. |
+| `audio-capture-napi` | Implemented | Cross-platform audio capture via SoX (macOS) / arecord (Linux). |
+| `image-processor-napi` | Implemented | Sharp-based image processing + macOS clipboard via `osascript`. |
+| `url-handler-napi` | Stub | `waitForUrlEvent()` always returns `null`. |
+| `@ant/computer-use-swift` | Implemented | macOS JXA/screencapture — display listing, screenshot, app management. |
+| `@ant/computer-use-input` | Implemented | macOS CGEvent JXA + AppleScript — mouse, keyboard, typing. |
+| `@ant/computer-use-mcp` | Partial stub | Real `targetImageSize()` math, but `buildTools()` returns `[]`. |
+| `@ant/claude-for-chrome-mcp` | Stub | Returns `null`/`[]` for everything. |
 
 ### Key Type Files
 
@@ -106,6 +126,19 @@ All `feature('FLAG_NAME')` calls come from `bun:bundle` (a build-time API). In t
 - **`src/types/message.ts`** — Message type hierarchy (UserMessage, AssistantMessage, SystemMessage, etc.).
 - **`src/types/permissions.ts`** — Permission mode and result types.
 
+## Engineering Tooling
+
+| Tool | Config | Command |
+|------|--------|---------|
+| **Linter** | `biome.json` (Biome v2.4.10) — many rules disabled for decompiled code | `bun run lint` |
+| **Formatter** | `biome.json` — 2-space indent, single quotes, no semicolons (except `.tsx`) | `bun run format` |
+| **Test runner** | `bunfig.toml` — Bun test, 10s timeout | `bun test` |
+| **Unused code** | `knip.json` — entry at `src/entrypoints/cli.tsx` | `bun run check:unused` |
+| **Pre-commit hook** | `.githooks/pre-commit` — runs `biome lint` on staged `.ts/.tsx/.js/.jsx` | auto via `git config core.hooksPath` |
+| **CI** | `.github/workflows/ci.yml` — lint, test, build on push/PR to main | GitHub Actions |
+| **Health check** | `scripts/health-check.ts` — code size, lint, tests, unused code, build | `bun run health` |
+| **Docs site** | `mint.json` + `docs/` — Mintlify architecture whitepaper | `bun run docs:dev` |
+
 ## Working with This Codebase
 
 - **Don't try to fix all tsc errors** — they're from decompilation and don't affect runtime.
@@ -113,3 +146,5 @@ All `feature('FLAG_NAME')` calls come from `bun:bundle` (a build-time API). In t
 - **React Compiler output** — Components have decompiled memoization boilerplate (`const $ = _c(N)`). This is normal.
 - **`bun:bundle` import** — In `src/main.tsx` and other files, `import { feature } from 'bun:bundle'` works at build time. At dev-time, the polyfill in `cli.tsx` provides it.
 - **`src/` path alias** — tsconfig maps `src/*` to `./src/*`. Imports like `import { ... } from 'src/utils/...'` are valid.
+- **Biome lint rules are relaxed** — many rules (e.g., `noExplicitAny`, `noUnusedVariables`) are off to accommodate decompiled code. Don't enable them without careful consideration.
+- **`.editorconfig`** uses tabs/4-space but **Biome** formats with spaces/2. Biome takes precedence for formatted files.
